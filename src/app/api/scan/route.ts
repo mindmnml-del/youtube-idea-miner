@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
-import { ApifyClient } from "apify-client";
 import { validateEnv } from "@/lib/env";
 import { isRateLimited, getClientIp } from "@/lib/rate-limit";
 import { scanSchema, formatZodError } from "@/lib/validate";
@@ -14,8 +13,22 @@ function getStripe() {
   return new Stripe(process.env.STRIPE_SECRET_KEY!);
 }
 
-function getApify() {
-  return new ApifyClient({ token: process.env.APIFY_API_TOKEN! });
+const APIFY_BASE = "https://api.apify.com/v2";
+
+async function apifyFetch(path: string, options?: RequestInit) {
+  const res = await fetch(`${APIFY_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.APIFY_API_TOKEN}`,
+      ...options?.headers,
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Apify API error (${res.status}): ${text}`);
+  }
+  return res.json();
 }
 
 interface ApifyComment {
@@ -97,8 +110,6 @@ function extractIdeas(comments: ApifyComment[]): ContentIdea[] {
     .slice(0, 100);
 }
 
-const APIFY_TIMEOUT_MS = 120_000; // 2 minutes
-
 export async function POST(req: NextRequest) {
   const ip = getClientIp(req);
 
@@ -142,10 +153,7 @@ export async function POST(req: NextRequest) {
     const expectedFingerprint = session.metadata?.fingerprint;
     const currentFingerprint = buildFingerprint(req);
     if (expectedFingerprint && expectedFingerprint !== currentFingerprint) {
-      logger.warn("Fingerprint mismatch on scan", {
-        sessionId,
-        ip,
-      });
+      logger.warn("Fingerprint mismatch on scan", { sessionId, ip });
       return NextResponse.json(
         { error: "Session mismatch" },
         { status: 403 }
@@ -155,21 +163,26 @@ export async function POST(req: NextRequest) {
     // Mark session consumed before running the expensive Apify call
     markSessionConsumed(sessionId);
 
-    // Run Apify YouTube Comment Scraper with timeout
-    const apify = getApify();
-    const runPromise = apify.actor("apify/youtube-comment-scraper").call({
-      startUrls: [{ url: videoUrl }],
-      maxComments: 300,
-      maxReplies: 0,
-    });
-
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error("Apify request timed out")), APIFY_TIMEOUT_MS)
+    // Start Apify actor run via REST API
+    const run = await apifyFetch(
+      "/acts/apify~youtube-comment-scraper/runs?waitForFinish=120",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          startUrls: [{ url: videoUrl }],
+          maxComments: 300,
+          maxReplies: 0,
+        }),
+      }
     );
 
-    const run = await Promise.race([runPromise, timeoutPromise]);
-    const { items } = await apify.dataset(run.defaultDatasetId).listItems();
-    const ideas = extractIdeas(items as ApifyComment[]);
+    // Fetch dataset items
+    const dataset = await apifyFetch(
+      `/datasets/${run.data.defaultDatasetId}/items?format=json`
+    );
+
+    const items: ApifyComment[] = Array.isArray(dataset) ? dataset : dataset.items ?? [];
+    const ideas = extractIdeas(items);
 
     logger.info("Scan completed", {
       sessionId,
