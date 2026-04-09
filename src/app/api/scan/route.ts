@@ -32,7 +32,9 @@ async function apifyFetch(path: string, options?: RequestInit) {
 }
 
 interface ApifyComment {
+  comment?: string;
   text?: string;
+  voteCount?: number;
   likesCount?: number;
   replyCount?: number;
   author?: string;
@@ -77,8 +79,8 @@ function extractIdeas(comments: ApifyComment[]): ContentIdea[] {
   const ideas: ContentIdea[] = [];
   const seen = new Set<string>();
 
-  for (const comment of comments) {
-    const text = comment.text?.trim();
+  for (const c of comments) {
+    const text = (c.comment ?? c.text)?.trim();
     if (!text || text.length < 15 || text.length > 500) continue;
 
     const normalized = text.toLowerCase().slice(0, 80);
@@ -97,9 +99,9 @@ function extractIdeas(comments: ApifyComment[]): ContentIdea[] {
     if (category) {
       ideas.push({
         idea: text.slice(0, 200),
-        source: comment.author ?? "Anonymous",
-        likes: comment.likesCount ?? 0,
-        replies: comment.replyCount ?? 0,
+        source: c.author ?? "Anonymous",
+        likes: c.voteCount ?? c.likesCount ?? 0,
+        replies: c.replyCount ?? 0,
         category,
       });
     }
@@ -196,7 +198,7 @@ export async function POST(req: NextRequest) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error("Scan error", { error: message, ip });
     return NextResponse.json(
-      { error: message },
+      { error: "Scan failed" },
       { status: 500 }
     );
   }
