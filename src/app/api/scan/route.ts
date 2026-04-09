@@ -2,8 +2,13 @@ import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { ApifyClient } from "apify-client";
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
-const apify = new ApifyClient({ token: process.env.APIFY_API_TOKEN! });
+function getStripe() {
+  return new Stripe(process.env.STRIPE_SECRET_KEY!);
+}
+
+function getApify() {
+  return new ApifyClient({ token: process.env.APIFY_API_TOKEN! });
+}
 
 interface ApifyComment {
   text?: string;
@@ -93,12 +98,13 @@ export async function POST(req: NextRequest) {
     }
 
     // Verify payment
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
+    const session = await getStripe().checkout.sessions.retrieve(sessionId);
     if (session.payment_status !== "paid") {
       return NextResponse.json({ error: "Payment not completed" }, { status: 403 });
     }
 
     // Run Apify YouTube Comment Scraper
+    const apify = getApify();
     const run = await apify.actor("apify/youtube-comment-scraper").call({
       startUrls: [{ url: videoUrl }],
       maxComments: 300,
