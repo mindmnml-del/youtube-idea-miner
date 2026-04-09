@@ -183,7 +183,7 @@ export async function POST(req: NextRequest) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error("Scan error", { error: message, ip });
     return NextResponse.json(
-      { error: "Scan failed. Please try again." },
+      { error: message },
       { status: 500 }
     );
   }
