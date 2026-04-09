@@ -165,7 +165,7 @@ export async function POST(req: NextRequest) {
 
     // Start Apify actor run via REST API
     const run = await apifyFetch(
-      "/acts/apify~youtube-comment-scraper/runs?waitForFinish=120",
+      "/acts/streamers~youtube-comments-scraper/runs?waitForFinish=120",
       {
         method: "POST",
         body: JSON.stringify({
