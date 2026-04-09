@@ -116,7 +116,8 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ideas, totalComments: items.length });
   } catch (err) {
-    console.error("Scan error:", err);
-    return NextResponse.json({ error: "Scan failed" }, { status: 500 });
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("Scan error:", message);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
