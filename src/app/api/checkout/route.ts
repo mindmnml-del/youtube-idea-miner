@@ -5,6 +5,12 @@ function getStripe() {
   return new Stripe(process.env.STRIPE_SECRET_KEY!);
 }
 
+function getBaseUrl(req: NextRequest) {
+  const host = req.headers.get("host") ?? "localhost:3000";
+  const proto = req.headers.get("x-forwarded-proto") ?? "https";
+  return `${proto}://${host}`;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const { videoUrl } = await req.json();
@@ -12,6 +18,8 @@ export async function POST(req: NextRequest) {
     if (!videoUrl || typeof videoUrl !== "string") {
       return NextResponse.json({ error: "Video URL is required" }, { status: 400 });
     }
+
+    const baseUrl = getBaseUrl(req);
 
     const session = await getStripe().checkout.sessions.create({
       payment_method_types: ["card"],
@@ -22,8 +30,8 @@ export async function POST(req: NextRequest) {
         },
       ],
       mode: "payment",
-      success_url: `${process.env.NEXT_PUBLIC_APP_URL}/success?session_id={CHECKOUT_SESSION_ID}&video_url=${encodeURIComponent(videoUrl)}`,
-      cancel_url: `${process.env.NEXT_PUBLIC_APP_URL}/?canceled=true`,
+      success_url: `${baseUrl}/success?session_id={CHECKOUT_SESSION_ID}&video_url=${encodeURIComponent(videoUrl)}`,
+      cancel_url: `${baseUrl}/?canceled=true`,
       metadata: { videoUrl },
     });
 
