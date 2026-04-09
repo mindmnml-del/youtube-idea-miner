@@ -1,6 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import Stripe from "stripe";
 import { ApifyClient } from "apify-client";
+import { validateEnv } from "@/lib/env";
+import { isRateLimited, getClientIp } from "@/lib/rate-limit";
+import { scanSchema, formatZodError } from "@/lib/validate";
+import { buildFingerprint } from "@/lib/fingerprint";
+import { isSessionConsumed, markSessionConsumed } from "@/lib/sessions";
+import { logger } from "@/lib/logger";
+
+validateEnv();
 
 function getStripe() {
   return new Stripe(process.env.STRIPE_SECRET_KEY!);
@@ -89,35 +97,94 @@ function extractIdeas(comments: ApifyComment[]): ContentIdea[] {
     .slice(0, 100);
 }
 
-export async function POST(req: NextRequest) {
-  try {
-    const { sessionId, videoUrl } = await req.json();
+const APIFY_TIMEOUT_MS = 120_000; // 2 minutes
 
-    if (!sessionId || !videoUrl) {
-      return NextResponse.json({ error: "Missing sessionId or videoUrl" }, { status: 400 });
+export async function POST(req: NextRequest) {
+  const ip = getClientIp(req);
+
+  if (isRateLimited(`scan:${ip}`, 3)) {
+    logger.warn("Rate limited scan", { ip });
+    return NextResponse.json({ error: "Too many requests" }, { status: 429 });
+  }
+
+  try {
+    const body = await req.json();
+    const parsed = scanSchema.safeParse(body);
+
+    if (!parsed.success) {
+      return NextResponse.json(
+        { error: formatZodError(parsed.error) },
+        { status: 400 }
+      );
+    }
+
+    const { sessionId, videoUrl } = parsed.data;
+
+    // Prevent session reuse
+    if (isSessionConsumed(sessionId)) {
+      logger.warn("Attempted session reuse", { sessionId, ip });
+      return NextResponse.json(
+        { error: "This scan session has already been used" },
+        { status: 403 }
+      );
     }
 
     // Verify payment
     const session = await getStripe().checkout.sessions.retrieve(sessionId);
     if (session.payment_status !== "paid") {
-      return NextResponse.json({ error: "Payment not completed" }, { status: 403 });
+      return NextResponse.json(
+        { error: "Payment not completed" },
+        { status: 403 }
+      );
     }
 
-    // Run Apify YouTube Comment Scraper
+    // Verify fingerprint matches checkout
+    const expectedFingerprint = session.metadata?.fingerprint;
+    const currentFingerprint = buildFingerprint(req);
+    if (expectedFingerprint && expectedFingerprint !== currentFingerprint) {
+      logger.warn("Fingerprint mismatch on scan", {
+        sessionId,
+        ip,
+      });
+      return NextResponse.json(
+        { error: "Session mismatch" },
+        { status: 403 }
+      );
+    }
+
+    // Mark session consumed before running the expensive Apify call
+    markSessionConsumed(sessionId);
+
+    // Run Apify YouTube Comment Scraper with timeout
     const apify = getApify();
-    const run = await apify.actor("apify/youtube-comment-scraper").call({
+    const runPromise = apify.actor("apify/youtube-comment-scraper").call({
       startUrls: [{ url: videoUrl }],
       maxComments: 300,
       maxReplies: 0,
     });
 
+    const timeoutPromise = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Apify request timed out")), APIFY_TIMEOUT_MS)
+    );
+
+    const run = await Promise.race([runPromise, timeoutPromise]);
     const { items } = await apify.dataset(run.defaultDatasetId).listItems();
     const ideas = extractIdeas(items as ApifyComment[]);
+
+    logger.info("Scan completed", {
+      sessionId,
+      totalComments: items.length,
+      ideasFound: ideas.length,
+      ip,
+    });
 
     return NextResponse.json({ ideas, totalComments: items.length });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error("Scan error:", message);
-    return NextResponse.json({ error: message }, { status: 500 });
+    logger.error("Scan error", { error: message, ip });
+    return NextResponse.json(
+      { error: "Scan failed. Please try again." },
+      { status: 500 }
+    );
   }
 }
